@@ -14,6 +14,13 @@ import com.neovisionaries.ws.client.WebSocketAdapter;
 import com.neovisionaries.ws.client.WebSocketFactory;
 import com.neovisionaries.ws.client.WebSocketFrame;
 
+/**
+ * kawasaki-sanのクライアント実装RFC6455対応なのがいい。
+ * WebSocketそのままな感じがいい。httpsプロキシに対応してそう。
+ *
+ * @author yumi
+ *
+ */
 public class WebsocketTunnelClient {
 
 	static final private int CONTENT_LENGTH = 1024 * 10;
