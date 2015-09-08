@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 /**
  * クライアント側でトンネルINする人
@@ -69,11 +70,15 @@ class TunnelConnection implements Runnable{
 	public void run() {
         try {
         	LOGGER.info("client openChannel(): tid=" + tid);
-        	Object b = client.openChannel(tid);
+        	AtomicInteger b = client.openChannel(tid);
         	
         	//TODO: wait for handshake
         	synchronized(b){
-        		b.wait(2000L);
+        		b.wait(5000L);//handshake timeout
+        	}
+        	if(b.get() == 0){
+        		LOGGER.info("open handshake is timeou.");
+        		//TODO: close();
         	}
         	
         	LOGGER.info("client channel: tid=" + tid + ", opened");
