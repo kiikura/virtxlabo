@@ -1,12 +1,10 @@
 package ilabo.rtunnel.agent;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-
-import org.bouncycastle.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.neovisionaries.ws.client.ProxySettings;
 import com.neovisionaries.ws.client.WebSocket;
@@ -31,7 +29,9 @@ public class WebsocketTunnelClient {
 	private String uri;
 	private WebSocket ws = null;
 
-	private ConcurrentHashMap<Byte, BlockingQueue<byte[]>> insessions = new ConcurrentHashMap<>();
+	private ConcurrentHashMap<Byte, OutputStream> insessions = new ConcurrentHashMap<>();
+
+	private ConcurrentHashMap<Byte, AtomicInteger> instatus = new ConcurrentHashMap<>();
 
 	// private int sendCount=CONTENT_LENGTH;
 
@@ -53,22 +53,31 @@ public class WebsocketTunnelClient {
 		ProxySettings settings = factory.getProxySettings();
 
 		this.ws = factory.createSocket(uri);
-
+		this.ws.getSocket().setTcpNoDelay(true);
 
 
 		this.ws.addListener(new WebSocketAdapter(){
 			@Override
 			public void onBinaryFrame(WebSocket websocket, WebSocketFrame frame) {
-				byte[] tunnelData = frame.getPayload();
-				ByteBuffer buf = ByteBuffer.wrap(tunnelData);
-				byte command = tunnelData[0];
-				byte id = tunnelData[1];
-				byte[] data = Arrays.copyOfRange(tunnelData, 2, tunnelData.length);
-				BlockingQueue<byte[]> inFrameQueue = insessions.get(id);
 				try {
-					inFrameQueue.put(data);
-				} catch (InterruptedException e) {
-					throw new RuntimeException(e);
+					byte[] tunnelData = frame.getPayload();
+					
+					byte command = tunnelData[0];
+					byte id = tunnelData[1];
+
+					switch(command){
+					case Protocol.TUNNEL_OPEN:
+						if(instatus.contains(id)){
+							AtomicInteger ai = instatus.get(id);
+							ai.incrementAndGet();
+							ai.notifyAll();//ハンドシェーク完了通知
+						}
+					case Protocol.TUNNEL_DATA:
+						OutputStream out = insessions.get(id);
+						out.write(tunnelData, 2, frame.getPayloadLength()-2);
+					}
+				} catch (IOException e) {
+					e.printStackTrace();
 				}
 			}
 
@@ -85,12 +94,18 @@ public class WebsocketTunnelClient {
 	 * エンドツーエンドのTCP接続。
 	 * @param i
 	 * @throws IOException
+	 * @return wait用のObject
 	 */
-	public void openChannel(byte id) throws IOException {
+	public AtomicInteger openChannel(byte id) throws IOException {
+		AtomicInteger blocker = new AtomicInteger(0);
+		instatus.put(id, blocker);
 		byte[] command = new byte[]{Protocol.TUNNEL_OPEN, id};
 
 		ws.sendBinary(command);
+		
+		return blocker;
 	}
+	
 
 	public void sendDisconnect(byte id) throws IOException {
 		byte[] command = new byte[]{Protocol.TUNNEL_DISCONNECT, id};
@@ -101,107 +116,111 @@ public class WebsocketTunnelClient {
 	public void sendClose(byte id) throws IOException {
 		byte[] command = new byte[]{Protocol.TUNNEL_CLOSE, id};
 		ws.sendBinary(command);
+		
+		insessions.get(id).close();
+		insessions.remove(id);
+		instatus.remove(id);
 	}
 
 
-	public void write(byte id, byte[] data) throws IOException {
+	public void write(byte id, byte[] data, int offset, int length) throws IOException {
 		//セグメンテーションは未考慮（tcpが頑張る想定）
 		ByteBuffer buf = ByteBuffer.allocate(data.length + 1);
 		buf.put(id);
-		buf.put(data);
+		buf.put(data, offset, length);
 		ws.sendBinary(buf.array());
 	}
 
 	int buf_len = 0;
 
-	public int read(byte id, byte[] foo, int s, int l ) throws IOException, InterruptedException {
-		if (closed)
-			return -1;
-
-		BlockingQueue<byte[]> inFrameQueue = insessions.get(id);
-		byte[] buf = null;
-		while((buf=inFrameQueue.poll(1000L, TimeUnit.MINUTES))==null){
-			System.out.println("nodata...");
-		}
-		System.out.println(buf);
-
+//	public int read(byte id, byte[] foo, int s, int l ) throws IOException, InterruptedException {
+//		if (closed)
+//			return -1;
 //
-//		try {
-//			if (buf_len > 0) {
-//				int len = buf_len;
-//				if (l < buf_len) {
-//					len = l;
-//				}
-//				int i = ib.receiveData(foo, s, len);
-//				buf_len -= i;
-//				return i;
-//			}
-//
-//			int len = 0;
-//			while (!closed) {
-//				int i = ib.receiveData(foo, s, 1);
-//				if (i <= 0) {
-//					return -1;
-//				}
-//				int request = foo[s] & 0xff;
-//				// System.out.println("request: "+request);
-//				if ((request & Protocol.TUNNEL_SIMPLE) == 0) {
-//					i = ib.receiveData(foo, s, 1);
-//					len = (((foo[s]) << 8) & 0xff00);
-//					i = ib.receiveData(foo, s, 1);
-//					len = len | (foo[s] & 0xff);
-//				}
-//				// System.out.println("request: "+request);
-//				switch (request) {
-//				case Protocol.TUNNEL_DATA:
-//					buf_len = len;
-//					// System.out.println("buf_len="+buf_len);
-//					if (l < buf_len) {
-//						len = l;
-//					}
-//					int orgs = s;
-//					while (len > 0) {
-//						i = ib.receiveData(foo, s, len);
-//						if (i < 0)
-//							break;
-//						buf_len -= i;
-//						s += i;
-//						len -= i;
-//					}
-//					// System.out.println("receiveData: "+(s-orgs));
-//					return s - orgs;
-//				case Protocol.TUNNEL_PADDING:
-//					ib.receiveData(null, 0, len);
-//					continue;
-//				case Protocol.TUNNEL_ERROR:
-//					byte[] error = new byte[len];
-//					ib.receiveData(error, 0, len);
-//					// System.out.println(new String(error, 0, len));
-//					throw new IOException("JHttpTunnel: " + new String(error, 0, len));
-//				case Protocol.TUNNEL_PAD1:
-//					continue;
-//				case Protocol.TUNNEL_CLOSE:
-//					closed = true;
-//					// close();
-//					// System.out.println("CLOSE");
-//					break;
-//				case Protocol.TUNNEL_DISCONNECT:
-//					// System.out.println("DISCONNECT");
-//					continue;
-//				default:
-//					// System.out.println("request="+request);
-//					// System.out.println(Integer.toHexString(request&0xff)+ "
-//					// "+new Character((char)request));
-//					throw new IOException(": protocol error 0x" + Integer.toHexString(request & 0xff));
-//				}
-//			}
-//		} catch (IOException e) {
-//			throw e;
-//		} catch (Exception e) {
-//			// System.out.println("JHttpTunnelClient.read: "+e);
+//		BlockingQueue<byte[]> inFrameQueue = insessions.get(id);
+//		byte[] buf = null;
+//		while((buf=inFrameQueue.poll(1000L, TimeUnit.MINUTES))==null){
+//			System.out.println("nodata...");
 //		}
-		return -1;
-	}
+//		System.out.println(buf);
+//
+////
+////		try {
+////			if (buf_len > 0) {
+////				int len = buf_len;
+////				if (l < buf_len) {
+////					len = l;
+////				}
+////				int i = ib.receiveData(foo, s, len);
+////				buf_len -= i;
+////				return i;
+////			}
+////
+////			int len = 0;
+////			while (!closed) {
+////				int i = ib.receiveData(foo, s, 1);
+////				if (i <= 0) {
+////					return -1;
+////				}
+////				int request = foo[s] & 0xff;
+////				// System.out.println("request: "+request);
+////				if ((request & Protocol.TUNNEL_SIMPLE) == 0) {
+////					i = ib.receiveData(foo, s, 1);
+////					len = (((foo[s]) << 8) & 0xff00);
+////					i = ib.receiveData(foo, s, 1);
+////					len = len | (foo[s] & 0xff);
+////				}
+////				// System.out.println("request: "+request);
+////				switch (request) {
+////				case Protocol.TUNNEL_DATA:
+////					buf_len = len;
+////					// System.out.println("buf_len="+buf_len);
+////					if (l < buf_len) {
+////						len = l;
+////					}
+////					int orgs = s;
+////					while (len > 0) {
+////						i = ib.receiveData(foo, s, len);
+////						if (i < 0)
+////							break;
+////						buf_len -= i;
+////						s += i;
+////						len -= i;
+////					}
+////					// System.out.println("receiveData: "+(s-orgs));
+////					return s - orgs;
+////				case Protocol.TUNNEL_PADDING:
+////					ib.receiveData(null, 0, len);
+////					continue;
+////				case Protocol.TUNNEL_ERROR:
+////					byte[] error = new byte[len];
+////					ib.receiveData(error, 0, len);
+////					// System.out.println(new String(error, 0, len));
+////					throw new IOException("JHttpTunnel: " + new String(error, 0, len));
+////				case Protocol.TUNNEL_PAD1:
+////					continue;
+////				case Protocol.TUNNEL_CLOSE:
+////					closed = true;
+////					// close();
+////					// System.out.println("CLOSE");
+////					break;
+////				case Protocol.TUNNEL_DISCONNECT:
+////					// System.out.println("DISCONNECT");
+////					continue;
+////				default:
+////					// System.out.println("request="+request);
+////					// System.out.println(Integer.toHexString(request&0xff)+ "
+////					// "+new Character((char)request));
+////					throw new IOException(": protocol error 0x" + Integer.toHexString(request & 0xff));
+////				}
+////			}
+////		} catch (IOException e) {
+////			throw e;
+////		} catch (Exception e) {
+////			// System.out.println("JHttpTunnelClient.read: "+e);
+////		}
+//		return -1;
+//	}
 
 //	private InputStream in = null;
 //
@@ -332,7 +351,11 @@ public class WebsocketTunnelClient {
 		WebsocketTunnelClient c = new WebsocketTunnelClient("ws://localhost:8080/session/hoge");
 		c.connect();
 		c.openChannel((byte)1);
-		c.write((byte)1, "aiueo".getBytes());
+		
+	}
 
+	public void addResponseHandler(byte id, OutputStream out) {
+		this.insessions.put(id, out);
+		
 	}
 }
