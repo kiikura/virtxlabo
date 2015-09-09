@@ -48,8 +48,8 @@ public class Server extends AbstractVerticle {
 			ws.handler(buf -> {
 				logger.info(String.format("%s: in=%s", id, buf));
 				for(Object hid : vertx.sharedData().getLocalMap("session.room." + sessionRoom).keySet()){
-					if(!id.equals(hid)){
-						eventBus.send((String)hid, buf);
+					if(!id.equals(hid)){//自分以外に送る
+						eventBus.send((String)hid, buf); //handlerIDで自動的にイベントバスに登録されてる
 					}
 				}
 
